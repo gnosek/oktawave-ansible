@@ -1,0 +1,117 @@
+#!/usr/bin/env python
+
+import os
+import json
+from oktawave.api import OktawaveApi
+import datetime
+import time
+
+def get_oci_by_name(api, name):
+    instances = api.OCI_List()
+    for oci in instances:
+        if oci['name'] == name:
+            return oci
+
+def sanitize_settings(obj):
+    # make obj json-serializable
+    if isinstance(obj, basestring):
+        return obj
+    elif isinstance(obj, datetime.datetime):
+        return obj.strftime('%c')
+    elif isinstance(obj, dict):
+        return {k: sanitize_settings(v) for k, v in obj.items()}
+    else:
+        try:
+            iterator = iter(obj)
+        except TypeError:
+            return obj
+        return [sanitize_settings(elt) for elt in obj]
+
+def wait_for_vm(api, name, timeout):
+    while timeout > 0:
+        oci = get_oci_by_name(api, name)
+        if oci:
+            break
+        time.sleep(10)
+        timeout -= 10
+
+    if oci:
+        oci_settings = api.OCI_Settings(oci['id'])
+        oci['settings'] = sanitize_settings(oci_settings)
+        return oci
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            okta_username=dict(required=True),
+            okta_password=dict(required=True),
+            name=dict(required=True),
+            state=dict(default="present", choices=["absent", "present"]),
+            oci_class=dict(),
+            origin_oci=dict(),
+            template_id=dict(),
+            change_at_midnight=dict(choices=BOOLEANS, type='bool', default=False),
+            wait_timeout=dict(default=300),
+        ),
+        supports_check_mode=True
+    )
+
+    okta_username = module.params.get('okta_username')
+    okta_password = module.params.get('okta_password')
+    name = module.params.get('name')
+    state = module.params.get('state')
+    oci_class = module.params.get('oci_class')
+    origin_oci = module.params.get('origin_oci')
+    if origin_oci is not None:
+        origin_oci = int(origin_oci)
+    template_id = module.params.get('template_id')
+    if template_id is not None:
+        template_id = int(template_id)
+    change_at_midnight = module.params.get('change_at_midnight')
+    wait_timeout = int(module.params.get('wait_timeout'))
+
+    api = OktawaveApi(username=okta_username, password=okta_password)
+    module_ret = dict(changed=False)
+
+    oci = get_oci_by_name(api, name)
+    if not oci:
+        if state == 'absent':
+            module.exit_json(**module_ret)
+        module_ret['changed'] = True
+        if origin_oci is not None:
+            if not module.check_mode:
+                try:
+                    origin_settings = api.OCI_Settings(origin_oci)
+                except Exception as exc:
+                    module.fail_json(msg='template OCI does not exist')
+                if oci_class is not None and origin_settings['vm_class_name'] != oci_class:
+                    module.fail_json(msg='template OCI has class %s not %s' % (origin_settings['vm_class_name'], oci_class))
+                api.OCI_Clone(origin_oci, name, 'AbsoluteCopy') # or 'Runtime'
+        elif template_id is not None:
+            if not module.check_mode:
+                api.OCI_Create(name, template_id, oci_class)
+        else:
+            module.fail_json(msg='either origin_oci or template_id is required to create a new OCI')
+        new_oci = wait_for_vm(api, name, wait_timeout)
+        if new_oci is None:
+            module.fail_json(msg='timeout waiting for new oci')
+        module_ret.update(new_oci)
+    else:
+        if state == 'absent':
+            if not module.check_mode:
+                api.OCI_Delete(oci['id'])
+            module_ret['changed'] = True
+            module.exit_json(**module_ret)
+        oci_settings = api.OCI_Settings(oci['id'])
+        oci['settings'] = sanitize_settings(oci_settings)
+        module_ret.update(oci)
+        if oci_class is not None and oci_class != oci_settings['vm_class_name']:
+            if not module.check_mode:
+                api.OCI_ChangeClass(oci['id'], oci_class, change_at_midnight)
+            module_ret['changed'] = True
+
+    module.exit_json(**module_ret)
+
+# this is magic, see lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()

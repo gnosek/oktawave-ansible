@@ -1,0 +1,5 @@
+---
+- hosts: localhost
+  gather_facts: false
+  tasks:
+  - oktawave: okta_username={{okta_username}} okta_password={{okta_password}} name={{name}} state=absent

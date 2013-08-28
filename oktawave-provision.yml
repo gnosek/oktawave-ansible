@@ -1,0 +1,16 @@
+---
+- hosts: localhost
+  gather_facts: false
+  tasks:
+  - oktawave: okta_username={{okta_username}} okta_password={{okta_password}} name={{template_name}}
+    register: template
+  - oktawave: okta_username={{okta_username}} okta_password={{okta_password}} name={{name}} origin_oci={{template.id}}
+    register: clone
+  - set_fact:
+      new_virt_ipv4: "{{clone.settings.ips.0.ipv4}}"
+      new_virt_id: "{{clone.id}}"
+  - wait_for: host={{new_virt_ipv4}} port=22 delay=10 timeout=120 state=started
+  - add_host: name={{new_virt_ipv4}} groups=new_virt
+- hosts: new_virt
+  tasks:
+  - ping:
