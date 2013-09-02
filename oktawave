@@ -46,7 +46,7 @@ def main():
             okta_username=dict(required=True),
             okta_password=dict(required=True),
             name=dict(required=True),
-            state=dict(default="present", choices=["absent", "present"]),
+            state=dict(default="present", choices=["absent", "present", "started", "stopped", "restarted"]),
             oci_class=dict(),
             origin_oci=dict(),
             template_id=dict(),
@@ -77,37 +77,52 @@ def main():
     if not oci:
         if state == 'absent':
             module.exit_json(**module_ret)
-        module_ret['changed'] = True
-        if origin_oci is not None:
-            if not module.check_mode:
-                try:
-                    origin_settings = api.OCI_Settings(origin_oci)
-                except Exception as exc:
-                    module.fail_json(msg='template OCI does not exist')
-                if oci_class is not None and origin_settings['vm_class_name'] != oci_class:
-                    module.fail_json(msg='template OCI has class %s not %s' % (origin_settings['vm_class_name'], oci_class))
-                api.OCI_Clone(origin_oci, name, 'AbsoluteCopy') # or 'Runtime'
-        elif template_id is not None:
-            if not module.check_mode:
-                api.OCI_Create(name, template_id, oci_class)
+        elif state in ('present', 'started'):
+            module_ret['changed'] = True
+            if origin_oci is not None:
+                if not module.check_mode:
+                    try:
+                        origin_settings = api.OCI_Settings(origin_oci)
+                    except Exception as exc:
+                        module.fail_json(msg='template OCI does not exist')
+                    if oci_class is not None and origin_settings['vm_class_name'] != oci_class:
+                        module.fail_json(msg='template OCI has class %s not %s' % (origin_settings['vm_class_name'], oci_class))
+                    api.OCI_Clone(origin_oci, name, 'AbsoluteCopy') # or 'Runtime'
+            elif template_id is not None:
+                if not module.check_mode:
+                    api.OCI_Create(name, template_id, oci_class)
+            else:
+                module.fail_json(msg='either origin_oci or template_id is required to create a new OCI')
+            new_oci = wait_for_vm(api, name, wait_timeout)
+            if new_oci is None:
+                module.fail_json(msg='timeout waiting for new oci')
+            module_ret.update(new_oci)
         else:
-            module.fail_json(msg='either origin_oci or template_id is required to create a new OCI')
-        new_oci = wait_for_vm(api, name, wait_timeout)
-        if new_oci is None:
-            module.fail_json(msg='timeout waiting for new oci')
-        module_ret.update(new_oci)
+            module.fail_json(msg='OCI %s does not exist, cannot stop/restart' % name)
     else:
         if state == 'absent':
             if not module.check_mode:
                 api.OCI_Delete(oci['id'])
             module_ret['changed'] = True
             module.exit_json(**module_ret)
+
         oci_settings = api.OCI_Settings(oci['id'])
         oci['settings'] = sanitize_settings(oci_settings)
         module_ret.update(oci)
         if oci_class is not None and oci_class != oci_settings['vm_class_name']:
             if not module.check_mode:
                 api.OCI_ChangeClass(oci['id'], oci_class, change_at_midnight)
+            module_ret['changed'] = True
+
+        power_status = oci_settings['status']
+        if state == 'started' and power_status != 'Powered On':
+            api.OCI_TurnOn(oci['id'])
+            module_ret['changed'] = True
+        elif state == 'stopped' and power_status != 'Powered Off':
+            api.OCI_TurnOff(oci['id'])
+            module_ret['changed'] = True
+        elif state == 'restarted':
+            api.OCI_Restart(oci['id'])
             module_ret['changed'] = True
 
     module.exit_json(**module_ret)
