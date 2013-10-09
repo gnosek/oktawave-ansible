@@ -4,7 +4,7 @@
   tasks:
   - oktawave: okta_username={{okta_username}} okta_password={{okta_password}} name={{template_name}}
     register: template
-  - oktawave: okta_username={{okta_username}} okta_password={{okta_password}} name={{name}} origin_oci={{template.id}}
+  - oktawave: okta_username={{okta_username}} okta_password={{okta_password}} name={{name}} origin_oci={{template.id}} state=started
     register: clone
   - set_fact:
       new_virt_ipv4: "{{clone.settings.ips.0.ipv4}}"

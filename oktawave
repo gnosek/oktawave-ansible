@@ -96,6 +96,8 @@ def main():
             new_oci = wait_for_vm(api, name, wait_timeout)
             if new_oci is None:
                 module.fail_json(msg='timeout waiting for new oci')
+            if state == 'started':
+                api.OCI_TurnOn(new_oci['id'])
             module_ret.update(new_oci)
         else:
             module.fail_json(msg='OCI %s does not exist, cannot stop/restart' % name)
