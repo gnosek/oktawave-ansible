@@ -2,7 +2,7 @@
 
 import os
 import json
-from oktawave.api import OktawaveApi
+from oktawave.api import OktawaveApi, PowerStatus, CloneType
 import datetime
 import time
 
@@ -20,6 +20,8 @@ def sanitize_settings(obj):
         return obj.strftime('%c')
     elif isinstance(obj, dict):
         return {k: sanitize_settings(v) for k, v in obj.items()}
+    elif isinstance(obj, PowerStatus):
+        return unicode(obj)
     else:
         try:
             iterator = iter(obj)
@@ -87,7 +89,7 @@ def main():
                         module.fail_json(msg='template OCI does not exist')
                     if oci_class is not None and origin_settings['vm_class_name'] != oci_class:
                         module.fail_json(msg='template OCI has class %s not %s' % (origin_settings['vm_class_name'], oci_class))
-                    api.OCI_Clone(origin_oci, name, 'AbsoluteCopy') # or 'Runtime'
+                    api.OCI_Clone(origin_oci, name, CloneType.AbsoluteCopy) # or 'Runtime'
             elif template_id is not None:
                 if not module.check_mode:
                     api.OCI_Create(name, template_id, oci_class)
@@ -98,6 +100,8 @@ def main():
                 module.fail_json(msg='timeout waiting for new oci')
             if state == 'started':
                 api.OCI_TurnOn(new_oci['id'])
+            power_status = new_oci['status']
+            new_oci['status'] = unicode(power_status)
             module_ret.update(new_oci)
         else:
             module.fail_json(msg='OCI %s does not exist, cannot stop/restart' % name)
@@ -110,17 +114,18 @@ def main():
 
         oci_settings = api.OCI_Settings(oci['id'])
         oci['settings'] = sanitize_settings(oci_settings)
+        power_status = oci['status']
+        oci['status'] = unicode(power_status)
         module_ret.update(oci)
         if oci_class is not None and oci_class != oci_settings['vm_class_name']:
             if not module.check_mode:
                 api.OCI_ChangeClass(oci['id'], oci_class, change_at_midnight)
             module_ret['changed'] = True
 
-        power_status = oci_settings['status']
-        if state == 'started' and power_status != 'Powered On':
+        if state == 'started' and power_status.status != PowerStatus.PowerOn:
             api.OCI_TurnOn(oci['id'])
             module_ret['changed'] = True
-        elif state == 'stopped' and power_status != 'Powered Off':
+        elif state == 'stopped' and power_status.status != PowerStatus.PowerOff:
             api.OCI_TurnOff(oci['id'])
             module_ret['changed'] = True
         elif state == 'restarted':
