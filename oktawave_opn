@@ -1,0 +1,130 @@
+#!/usr/bin/env python
+
+import os
+import json
+from oktawave.api import OktawaveApi
+from oktawave.exceptions import OktawaveOCIInOPN
+import time
+
+def get_opn_by_name(api, name):
+    opns = api.OPN_List()
+    opn_id = None
+    for opn in opns:
+        if opn['name'] == name:
+            opn_id = opn['id']
+
+    if opn_id:
+        return api.OPN_Get(opn_id)
+
+def wait_for_opn(api, name, timeout):
+    if timeout == 0:
+        return get_opn_by_name(api, name)
+
+    while timeout > 0:
+        opn = get_opn_by_name(api, name)
+        if opn:
+            break
+        time.sleep(10)
+        timeout -= 10
+
+    return opn
+
+def manage_opn(module, api, name, subnet, state, wait_timeout):
+    module_ret = dict(changed=False)
+    opn = get_opn_by_name(api, name)
+
+    if opn:
+        if state == 'present':
+            module_ret.update(opn)
+        else:
+            module_ret['changed'] = True
+            if not module.check_mode:
+                api.OPN_Delete(opn['id'])
+    else:
+        if state == 'absent':
+            pass
+        else:
+            module_ret['changed'] = True
+            if not module.check_mode:
+                api.OPN_Create(name, subnet)
+                opn = wait_for_opn(api, name, wait_timeout)
+                if opn:
+                    module_ret.update(opn)
+    module.exit_json(**module_ret)
+
+def manage_opn_membership(module, api, name, oci_id, address, state, wait_timeout):
+    module_ret = dict(changed=False)
+    opn = get_opn_by_name(api, name)
+    if not opn:
+        module.fail_json(msg='OPN does not exist')
+
+    current_address = None
+    for vm in opn['vms']:
+        if vm['VirtualMachine']['VirtualMachineId'] == oci_id:
+            current_address = vm['PrivateIpAddress']
+            break
+
+    if state == 'present':
+        if current_address is None:
+            if address is None:
+                module.fail_json(msg='Private IP address required')
+            module_ret['changed'] = True
+            if not module.check_mode:
+                api.OPN_AddOCI(opn['id'], oci_id, address)
+        elif address is not None:
+            if address != current_address:
+                module_ret['changed'] = True
+                if not module.check_mode:
+                    api.OPN_RemoveOCI(opn['id'], oci_id)
+                    timeout = wait_timeout
+                    while timeout > 0:
+                        try:
+                            api.OPN_AddOCI(opn['id'], oci_id, address)
+                            break
+                        except OktawaveOCIInOPN:
+                            time.sleep(10)
+                            timeout -= 10
+    else:
+        if current_address is not None:
+            module_ret['changed'] = True
+            if not module.check_mode:
+                api.OPN_RemoveOCI(opn['id'], oci_id)
+
+    module.exit_json(**module_ret)
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            okta_username=dict(required=True),
+            okta_password=dict(required=True),
+            name=dict(required=True),
+            state=dict(default="present", choices=["absent", "present"]),
+            oci_id=dict(),
+            subnet=dict(default="10.0.0.0/24", choices=["10.0.0.0/24", "192.168.0.0/24"]),
+            address=dict(),
+            wait_timeout=dict(default=300),
+        ),
+        supports_check_mode=True
+    )
+
+    okta_username = module.params.get('okta_username')
+    okta_password = module.params.get('okta_password')
+    name = module.params.get('name')
+    state = module.params.get('state')
+    subnet = module.params.get('subnet')
+    address = module.params.get('address')
+    oci_id = module.params.get('oci_id')
+    if oci_id is not None:
+        oci_id = int(oci_id)
+    wait_timeout = int(module.params.get('wait_timeout'))
+
+    api = OktawaveApi(username=okta_username, password=okta_password)
+
+    if oci_id:
+        manage_opn_membership(module, api, name, oci_id, address, state, wait_timeout)
+    else:
+        manage_opn(module, api, name, subnet, state, wait_timeout)
+
+# this is magic, see lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()
