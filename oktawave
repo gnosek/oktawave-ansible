@@ -29,7 +29,7 @@ def sanitize_settings(obj):
             return obj
         return [sanitize_settings(elt) for elt in obj]
 
-def wait_for_vm(api, name, timeout):
+def wait_for_vm(api, name, timeout, want_password):
     while timeout > 0:
         oci = get_oci_by_name(api, name)
         if oci:
@@ -37,10 +37,23 @@ def wait_for_vm(api, name, timeout):
         time.sleep(10)
         timeout -= 10
 
-    if oci:
-        oci_settings = api.OCI_Settings(oci['id'])
-        oci['settings'] = sanitize_settings(oci_settings)
+    if not oci:
+        return
+
+    oci_settings = api.OCI_Settings(oci['id'])
+    oci['settings'] = sanitize_settings(oci_settings)
+    if not want_password:
         return oci
+
+    while timeout > 0:
+        password = api.OCI_DefaultPassword(oci['id'])
+        if password:
+            oci['settings']['password'] = password
+            break
+        time.sleep(10)
+        timeout -= 10
+
+    return oci
 
 def main():
     module = AnsibleModule(
@@ -81,6 +94,7 @@ def main():
             module.exit_json(**module_ret)
         elif state in ('present', 'started'):
             module_ret['changed'] = True
+            want_password = False
             if origin_oci is not None:
                 if not module.check_mode:
                     try:
@@ -93,9 +107,10 @@ def main():
             elif template_id is not None:
                 if not module.check_mode:
                     api.OCI_Create(name, template_id, oci_class)
+                    want_password = True
             else:
                 module.fail_json(msg='either origin_oci or template_id is required to create a new OCI')
-            new_oci = wait_for_vm(api, name, wait_timeout)
+            new_oci = wait_for_vm(api, name, wait_timeout, want_password)
             if new_oci is None:
                 module.fail_json(msg='timeout waiting for new oci')
             power_status = new_oci['status']
@@ -120,6 +135,7 @@ def main():
         oci['settings'] = sanitize_settings(oci_settings)
         power_status = oci['status']
         oci['status'] = unicode(power_status)
+        oci['settings']['password'] = api.OCI_DefaultPassword(oci['id'])
         module_ret.update(oci)
         if oci_class is not None and oci_class != oci_settings['vm_class_name']:
             if not module.check_mode:
