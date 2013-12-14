@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-import os
 import json
 from oktawave.api import OktawaveApi, PowerStatus, CloneType
 import datetime
