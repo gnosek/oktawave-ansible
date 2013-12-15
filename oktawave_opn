@@ -6,6 +6,52 @@ from oktawave.api import OktawaveApi
 from oktawave.exceptions import OktawaveOCIInOPN
 import time
 
+# -- universal helper methods --
+# copied/pasted between modules as they must fit in a single file
+import requests.exceptions
+import datetime
+
+def serializable(obj):
+    # make obj json-serializable
+    if isinstance(obj, (basestring, int)):
+        return obj
+    elif isinstance(obj, datetime.datetime):
+        return obj.strftime('%c')
+    elif isinstance(obj, dict):
+        return {k: serializable(v) for k, v in obj.items()}
+    elif hasattr(obj, 'label'):
+        return obj.label
+    elif obj in (True, False, None):
+        return obj
+    else:
+        try:
+            iterator = iter(obj)
+        except TypeError:
+            return unicode(obj)
+        return [serializable(elt) for elt in obj]
+
+class APIWrapper(object):
+    def __init__(self, module, api):
+        self.module = module
+        self.api = api
+
+    def request_wrapper(self, reqf):
+        def wrapper(*args, **kwargs):
+            try:
+                return reqf(*args, **kwargs)
+            except requests.exceptions.HTTPError as exc:
+                arg_msg = ', '.join(repr(a) for a in args)
+                kwarg_msg = ', '.join('%s=%s' % (k, repr(v)) for k, v in kwargs.items())
+                call_msg = '%s(%s)' % (reqf.__name__, ', '.join((arg_msg, kwarg_msg)))
+                self.module.fail_json(msg='Call to %s failed: %s' % (call_msg, exc.response.text))
+        return wrapper
+
+    def __getattr__(self, name):
+        method = getattr(self.api, name)
+        return self.request_wrapper(method)
+
+# -- end --
+
 def get_opn_by_name(api, name):
     opns = api.OPN_List()
     opn_id = None
@@ -35,7 +81,7 @@ def manage_opn(module, api, name, subnet, state, wait_timeout):
 
     if opn:
         if state == 'present':
-            module_ret.update(opn)
+            module_ret.update(serializable(opn))
         else:
             module_ret['changed'] = True
             if not module.check_mode:
@@ -49,7 +95,7 @@ def manage_opn(module, api, name, subnet, state, wait_timeout):
                 api.OPN_Create(name, subnet)
                 opn = wait_for_opn(api, name, wait_timeout)
                 if opn:
-                    module_ret.update(opn)
+                    module_ret.update(serializable(opn))
     module.exit_json(**module_ret)
 
 def manage_opn_membership(module, api, name, oci_id, address, state, wait_timeout):
@@ -118,7 +164,7 @@ def main():
         oci_id = int(oci_id)
     wait_timeout = int(module.params.get('wait_timeout'))
 
-    api = OktawaveApi(username=okta_username, password=okta_password)
+    api = APIWrapper(module, OktawaveApi(username=okta_username, password=okta_password))
 
     if oci_id:
         manage_opn_membership(module, api, name, oci_id, address, state, wait_timeout)

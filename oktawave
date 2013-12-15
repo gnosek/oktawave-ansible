@@ -2,31 +2,59 @@
 
 import json
 from oktawave.api import OktawaveApi, PowerStatus, CloneType
-import datetime
 import time
+
+# -- universal helper methods --
+# copied/pasted between modules as they must fit in a single file
+import requests.exceptions
+import datetime
+
+def serializable(obj):
+    # make obj json-serializable
+    if isinstance(obj, (basestring, int)):
+        return obj
+    elif isinstance(obj, datetime.datetime):
+        return obj.strftime('%c')
+    elif isinstance(obj, dict):
+        return {k: serializable(v) for k, v in obj.items()}
+    elif hasattr(obj, 'label'):
+        return obj.label
+    elif obj in (True, False, None):
+        return obj
+    else:
+        try:
+            iterator = iter(obj)
+        except TypeError:
+            return unicode(obj)
+        return [serializable(elt) for elt in obj]
+
+class APIWrapper(object):
+    def __init__(self, module, api):
+        self.module = module
+        self.api = api
+
+    def request_wrapper(self, reqf):
+        def wrapper(*args, **kwargs):
+            try:
+                return reqf(*args, **kwargs)
+            except requests.exceptions.HTTPError as exc:
+                arg_msg = ', '.join(repr(a) for a in args)
+                kwarg_msg = ', '.join('%s=%s' % (k, repr(v)) for k, v in kwargs.items())
+                call_msg = '%s(%s)' % (reqf.__name__, ', '.join((arg_msg, kwarg_msg)))
+                self.module.fail_json(msg='Call to %s failed: %s' % (call_msg, exc.response.text))
+        return wrapper
+
+    def __getattr__(self, name):
+        method = getattr(self.api, name)
+        return self.request_wrapper(method)
+
+# -- end --
 
 def get_oci_by_name(api, name):
     instances = api.OCI_List()
     for oci in instances:
         if oci['name'] == name:
             return oci
-
-def sanitize_settings(obj):
-    # make obj json-serializable
-    if isinstance(obj, basestring):
-        return obj
-    elif isinstance(obj, datetime.datetime):
-        return obj.strftime('%c')
-    elif isinstance(obj, dict):
-        return {k: sanitize_settings(v) for k, v in obj.items()}
-    elif isinstance(obj, PowerStatus):
-        return unicode(obj)
-    else:
-        try:
-            iterator = iter(obj)
-        except TypeError:
-            return obj
-        return [sanitize_settings(elt) for elt in obj]
 
 def wait_for_vm(api, name, timeout, want_password):
     while timeout > 0:
@@ -40,7 +68,7 @@ def wait_for_vm(api, name, timeout, want_password):
         return
 
     oci_settings = api.OCI_Settings(oci['id'])
-    oci['settings'] = sanitize_settings(oci_settings)
+    oci['settings'] = serializable(oci_settings)
     if not want_password:
         return oci
 
@@ -84,7 +112,7 @@ def main():
     change_at_midnight = module.params.get('change_at_midnight')
     wait_timeout = int(module.params.get('wait_timeout'))
 
-    api = OktawaveApi(username=okta_username, password=okta_password)
+    api = APIWrapper(module, OktawaveApi(username=okta_username, password=okta_password))
     module_ret = dict(changed=False)
 
     oci = get_oci_by_name(api, name)
@@ -131,7 +159,7 @@ def main():
             module.exit_json(**module_ret)
 
         oci_settings = api.OCI_Settings(oci['id'])
-        oci['settings'] = sanitize_settings(oci_settings)
+        oci['settings'] = serializable(oci_settings)
         power_status = oci['status']
         oci['status'] = unicode(power_status)
         oci['settings']['password'] = api.OCI_DefaultPassword(oci['id'])
