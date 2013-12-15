@@ -1,0 +1,231 @@
+#!/usr/bin/env python
+
+import os
+import json
+from oktawave.api import OktawaveApi
+
+# -- universal helper methods --
+# copied/pasted between modules as they must fit in a single file
+import requests.exceptions
+import datetime
+
+def serializable(obj):
+    # make obj json-serializable
+    if isinstance(obj, (basestring, int)):
+        return obj
+    elif isinstance(obj, datetime.datetime):
+        return obj.strftime('%c')
+    elif isinstance(obj, dict):
+        return {k: serializable(v) for k, v in obj.items()}
+    elif hasattr(obj, 'label'):
+        return obj.label
+    elif obj in (True, False, None):
+        return obj
+    else:
+        try:
+            iterator = iter(obj)
+        except TypeError:
+            return unicode(obj)
+        return [serializable(elt) for elt in obj]
+
+class APIWrapper(object):
+    def __init__(self, module, api):
+        self.module = module
+        self.api = api
+
+    def request_wrapper(self, reqf):
+        def wrapper(*args, **kwargs):
+            try:
+                return reqf(*args, **kwargs)
+            except requests.exceptions.HTTPError as exc:
+                arg_msg = ', '.join(repr(a) for a in args)
+                kwarg_msg = ', '.join('%s=%s' % (k, repr(v)) for k, v in kwargs.items())
+                call_msg = '%s(%s)' % (reqf.__name__, ', '.join((arg_msg, kwarg_msg)))
+                self.module.fail_json(msg='Call to %s failed: %s' % (call_msg, exc.response.text))
+        return wrapper
+
+    def __getattr__(self, name):
+        method = getattr(self.api, name)
+        return self.request_wrapper(method)
+
+# -- end --
+
+def get_container_by_name(api, name):
+    containers = api.Container_List()
+    container_id = None
+    for container in containers:
+        if container['name'] == name:
+            container_id = container['id']
+
+    if container_id:
+        return api.Container_Get(container_id)
+
+def wait_for_container(api, name, timeout):
+    if timeout == 0:
+        return get_container_by_name(api, name)
+
+    while timeout > 0:
+        container = get_container_by_name(api, name)
+        if container:
+            break
+        time.sleep(10)
+        timeout -= 10
+
+    return container
+
+PARAMS_MAP = {
+    'autoscaling': {
+        'On': True,
+        'Off': False,
+    },
+}
+REVERSE_PARAMS_MAP = {
+    'autoscaling': {
+        True: 'on',
+        False: 'off',
+    },
+    'service': {
+        'http': 'HTTP',
+        'https': 'HTTPS',
+        'smtp': 'SMTP',
+        'mysql': 'MySQL',
+        'port': 'Port',
+    },
+}
+
+KEY_MAP = {
+    'load_balancer_algorithm': 'lb_algorithm',
+    'session_type': 'session',
+    'master_service_id': 'master_id',
+}
+
+def build_api_params(params):
+    for k, v in KEY_MAP.items():
+        params[v] = params.pop(k)
+    for k, v in REVERSE_PARAMS_MAP.items():
+        params[k] = v[params[k]]
+    return params
+
+def fixup_container_quirks(container):
+    # fix inconsistencies between ansible interface and API
+    container['service'].label = container['service'].label.lower()
+    container['autoscaling'].label = (container['service'].label == 'on')
+
+def manage_container(module, api, name, params, state):
+    module_ret = dict(changed=False)
+    container = get_container_by_name(api, name)
+
+    if container:
+        if state == 'present':
+            fixup_container_quirks(container)
+            module_ret.update(serializable(container))
+            diff = False
+            for k, pv in params.items():
+                cv = serializable(container[k])
+                if cv != pv:
+                    diff = True
+            if diff:
+                module_ret['changed'] = True
+                if not module.check_mode:
+                    params = build_api_params(params)
+                    api.Container_Edit(container['id'], name, **params)
+                    new_container = api.Container_Get(container['id'])
+                    fixup_container_quirks(new_container)
+                    module_ret.update(serializable(new_container))
+                    
+        else:
+            module_ret['changed'] = True
+            if not module.check_mode:
+                api.Container_Delete(container['id'])
+    else:
+        if state == 'absent':
+            pass
+        else:
+            module_ret['changed'] = True
+            if not module.check_mode:
+                api_params = build_api_params(params)
+                container_id = api.Container_Create(name, **api_params)
+                module_ret.update(id=container_id, name=name, **params)
+    module.exit_json(**module_ret)
+
+def manage_container_membership(module, api, name, oci_id, state):
+    module_ret = dict(changed=False)
+    container = get_container_by_name(api, name)
+    if not container:
+        module.fail_json(msg='Container does not exist')
+
+    vms = set(vm['oci_id'] for vm in api.Container_OCIList(container['id']))
+
+    if state == 'present':
+        if oci_id not in vms:
+            module_ret['changed'] = True
+            if not module.check_mode:
+                api.Container_AddOCI(container['id'], oci_id)
+    else:
+        if oci_id in vms:
+            module_ret['changed'] = True
+            if not module.check_mode:
+                api.Container_RemoveOCI(container['id'], oci_id)
+
+    module.exit_json(**module_ret)
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            okta_username=dict(required=True),
+            okta_password=dict(required=True),
+            name=dict(required=True),
+            state=dict(default="present", choices=["absent", "present"]),
+            oci_id=dict(),
+
+            autoscaling=dict(default='no', choices=BOOLEANS),
+            load_balancer=dict(default='no', choices=BOOLEANS),
+            ssl=dict(default='no', choices=BOOLEANS),
+            proxy_cache=dict(default='no', choices=BOOLEANS),
+            healthcheck=dict(default='no', choices=BOOLEANS),
+            ip_version=dict(default='4', choices=['4', '6', 'both']),
+            load_balancer_algorithm=dict(default='least_response_time', choices=[
+                'least_response_time', 'least_connections', 'source_ip_hash', 'round_robin']),
+            service=dict(default='http', choices=['http', 'https', 'smtp', 'mysql', 'port']),
+            port=dict(),
+            session_type=dict(default='none', choices=['none', 'by_source_ip', 'by_cookie']),
+            master_service_id=dict(),
+        ),
+        supports_check_mode=True
+    )
+
+
+    okta_username = module.params.get('okta_username')
+    okta_password = module.params.get('okta_password')
+    name = module.params.get('name')
+    state = module.params.get('state')
+    oci_id = module.params.get('oci_id')
+    if oci_id is not None:
+        oci_id = int(oci_id)
+
+    params = {
+        'autoscaling': module.boolean(module.params.get('autoscaling')),
+        'load_balancer': module.boolean(module.params.get('load_balancer')),
+        'ssl': module.boolean(module.params.get('ssl')),
+        'proxy_cache': module.boolean(module.params.get('proxy_cache')),
+        'healthcheck': module.boolean(module.params.get('healthcheck')),
+        'ip_version': module.params.get('ip_version'),
+        'load_balancer_algorithm': module.params.get('load_balancer_algorithm'),
+        'service': module.params.get('service'),
+        'port': module.params.get('port'),
+        'session_type': module.params.get('session_type'),
+        'master_service_id': module.params.get('master_service_id'),
+    }
+    if params['port']:
+        params['port'] = int(params['port'])
+
+    api = APIWrapper(module, OktawaveApi(username=okta_username, password=okta_password))
+
+    if oci_id:
+        manage_container_membership(module, api, name, oci_id, state)
+    else:
+        manage_container(module, api, name, params, state)
+
+# this is magic, see lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()
