@@ -8,6 +8,8 @@ from oktawave.api import OktawaveApi
 # copied/pasted between modules as they must fit in a single file
 import requests.exceptions
 import datetime
+import time
+from oktawave.exceptions import OktawaveAPIError
 
 def serializable(obj):
     # make obj json-serializable
@@ -35,13 +37,19 @@ class APIWrapper(object):
 
     def request_wrapper(self, reqf):
         def wrapper(*args, **kwargs):
-            try:
-                return reqf(*args, **kwargs)
-            except requests.exceptions.HTTPError as exc:
-                arg_msg = ', '.join(repr(a) for a in args)
-                kwarg_msg = ', '.join('%s=%s' % (k, repr(v)) for k, v in kwargs.items())
-                call_msg = '%s(%s)' % (reqf.__name__, ', '.join((arg_msg, kwarg_msg)))
-                self.module.fail_json(msg='Call to %s failed: %s' % (call_msg, exc.response.text))
+            while True:
+                try:
+                    return reqf(*args, **kwargs)
+                except requests.exceptions.HTTPError as exc:
+                    arg_msg = ', '.join(repr(a) for a in args)
+                    kwarg_msg = ', '.join('%s=%s' % (k, repr(v)) for k, v in kwargs.items())
+                    call_msg = '%s(%s)' % (reqf.__name__, ', '.join((arg_msg, kwarg_msg)))
+                    self.module.fail_json(msg='Call to %s failed: %s' % (call_msg, exc.response.text))
+                except OktawaveAPIError as exc:
+                    if exc.code == exc.OCI_PENDING_OPS:  # wait a bit before retrying
+                        time.sleep(5)
+                    else:
+                        raise
         return wrapper
 
     def __getattr__(self, name):
