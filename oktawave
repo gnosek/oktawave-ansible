@@ -96,6 +96,7 @@ def main():
             okta_password=dict(required=True),
             name=dict(required=True),
             state=dict(default="present", choices=["absent", "present", "started", "stopped", "restarted"]),
+            disk_size_gb=dict(),
             oci_class=dict(),
             origin_oci=dict(),
             template_id=dict(),
@@ -109,6 +110,9 @@ def main():
     okta_password = module.params.get('okta_password')
     name = module.params.get('name')
     state = module.params.get('state')
+    disk_size_gb = module.params.get('disk_size_gb')
+    if disk_size_gb is not None:
+        disk_size_gb = int(disk_size_gb)
     oci_class = module.params.get('oci_class')
     origin_oci = module.params.get('origin_oci')
     if origin_oci is not None:
@@ -140,7 +144,7 @@ def main():
                     api.OCI_Clone(origin_oci, name, CloneType.AbsoluteCopy) # or 'Runtime'
             elif template_id is not None:
                 if not module.check_mode:
-                    api.OCI_Create(name, template_id, oci_class)
+                    api.OCI_Create(name, template_id, oci_class, disk_size_gb=disk_size_gb)
                     want_password = True
             else:
                 module.fail_json(msg='either origin_oci or template_id is required to create a new OCI')
